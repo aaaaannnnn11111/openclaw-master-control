@@ -34,14 +34,15 @@
 ### 1. 安装依赖
 
 ```bash
-cd /home/anny/PycharmProjects/openclaw
+git clone https://github.com/aaaaannnnn11111/openclaw-master-control.git
+cd openclaw-master-control
 pip3 install -r requirements.txt
 ```
 
 ### 2. 启动主控服务
 
 ```bash
-python3 master_control/server.py
+python3 server.py
 ```
 
 服务将在 http://0.0.0.0:8888 启动
@@ -55,16 +56,16 @@ python3 master_control/server.py
 
 ```bash
 # 添加机器人
-python3 master_control/cli.py add 172.16.14.52 -u root -p yourpassword --deploy
+python3 cli.py add 172.16.14.52 -u root -p yourpassword --deploy
 
 # 查看机器人列表
-python3 master_control/cli.py list
+python3 cli.py list
 
 # 获取微信二维码
-python3 master_control/cli.py qr --ip 172.16.14.52
+python3 cli.py qr --ip 172.16.14.52
 
 # 查看日志
-python3 master_control/cli.py logs
+python3 cli.py logs
 ```
 
 ## 使用流程
@@ -94,42 +95,40 @@ python3 master_control/cli.py logs
 
 ```bash
 # 添加机器人
-python3 master_control/cli.py add <IP> -u <user> -p <password>
+python3 cli.py add <IP> -u <user> -p <password>
 
 # 部署
-python3 master_control/cli.py deploy --ip <IP>
+python3 cli.py deploy --ip <IP>
 
 # 状态
-python3 master_control/cli.py status --ip <IP>
+python3 cli.py status --ip <IP>
 
 # 微信二维码
-python3 master_control/cli.py qr --ip <IP>
+python3 cli.py qr --ip <IP>
 
 # 用户管理
-python3 master_control/cli.py add-user <username> --role admin
+python3 cli.py add-user <username> --role admin
 
 # 日志
-python3 master_control/cli.py logs --limit 20
+python3 cli.py logs --limit 20
 ```
 
 ## 目录结构
 
 ```
-openclaw/
-├── master_control/
-│   ├── config.py       # 配置文件
-│   ├── models.py       # 数据库模型
-│   ├── deployer.py     # SSH部署模块
-│   ├── server.py       # Web服务
-│   └── cli.py          # CLI工具
-├── scripts/            # 辅助脚本
+openclaw-master-control/
+├── config.py       # 配置文件
+├── models.py       # 数据库模型
+├── deployer.py     # SSH部署模块
+├── server.py       # Web服务
+├── cli.py          # CLI工具
 ├── requirements.txt   # Python依赖
 └── README.md          # 说明文档
 ```
 
 ## 配置说明
 
-修改 `master_control/config.py` 可调整：
+修改 `config.py` 可调整：
 - 数据库路径
 - 服务端口
 - SSH连接参数
