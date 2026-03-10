@@ -8,7 +8,7 @@ import sys
 import json
 import uuid
 from datetime import datetime
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, redirect
 from flask_cors import CORS
 
 # 添加项目路径
@@ -77,6 +77,27 @@ INDEX_HTML = '''
         .alert-error { background: #fee2e2; color: #991b1b; }
         .alert-info { background: #dbeafe; color: #1e40af; }
         .alert-warning { background: #fef3c7; color: #92400e; }
+        
+        /* 部署输出区域 */
+        .deploy-output { 
+            background: #1e1e1e; 
+            color: #00ff00; 
+            padding: 15px; 
+            border-radius: 8px; 
+            font-family: monospace; 
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .deploy-output.active { display: block; }
+        .deploy-output .line { margin: 2px 0; }
+        .deploy-output .error { color: #ff4444; }
+        .deploy-output .success { color: #00ff00; }
+        .deploy-output .info { color: #00bfff; }
+        .deploy-output .warning { color: #ffaa00; }
     </style>
 </head>
 <body>
@@ -86,16 +107,16 @@ INDEX_HTML = '''
     
     <div class="container">
         <div class="tabs">
-            <div class="tab active" data-tab="robots">机器人管理</div>
-            <div class="tab" data-tab="users">用户管理</div>
-            <div class="tab" data-tab="logs">操作日志</div>
+            <a href="/?tab=robots" class="tab active" data-tab="robots">机器人管理</a>
+            <a href="/?tab=users" class="tab" data-tab="users">用户管理</a>
+            <a href="/?tab=logs" class="tab" data-tab="logs">操作日志</a>
         </div>
         
         <!-- 机器人管理 -->
         <div class="tab-content active" id="tab-robots">
             <div class="card">
                 <h2>添加新机器人</h2>
-                <form id="addRobotForm">
+                <form method="post" action="/add_robot">
                     <div class="grid">
                         <div class="form-group">
                             <label>IP地址 *</label>
@@ -114,8 +135,14 @@ INDEX_HTML = '''
                             <input type="password" name="ssh_password" required placeholder="必填">
                         </div>
                     </div>
-                    <button type="submit" class="btn">添加并部署</button>
+                    <button type="submit" class="btn" onclick="showDeployOutput()">添加并部署</button>
                 </form>
+            </div>
+            
+            <!-- 部署输出区域 -->
+            <div class="card">
+                <h2>部署实时输出</h2>
+                <div id="deployOutput" class="deploy-output"><span class="info">等待部署...</span></div>
             </div>
             
             <div class="card">
@@ -173,8 +200,10 @@ INDEX_HTML = '''
 
     <script>
         // Tab切换
+        console.log('Initializing tabs...');
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
+                console.log('Tab clicked:', tab.dataset.tab);
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
                 document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
                 tab.classList.add('active');
@@ -183,6 +212,7 @@ INDEX_HTML = '''
         });
         
         // 加载机器人
+        console.log('Loading robots...');
         async function loadRobots() {
             const res = await fetch('/api/robots');
             const data = await res.json();
@@ -401,6 +431,46 @@ INDEX_HTML = '''
             }
         };
         
+        // 部署输出SSE
+        let eventSource = null;
+        function showDeployOutput() {
+            const outputDiv = document.getElementById('deployOutput');
+            outputDiv.classList.add('active');
+            outputDiv.innerHTML = '<span class="info">正在连接部署服务...</span>\n';
+            
+            // 关闭之前的连接
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            // 监听部署输出
+            eventSource = new EventSource('/deploy/stream');
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                if (data.type === 'line') {
+                    let cls = 'info';
+                    if (data.text.includes('✅')) cls = 'success';
+                    else if (data.text.includes('❌')) cls = 'error';
+                    else if (data.text.includes('⚠️')) cls = 'warning';
+                    outputDiv.innerHTML += '<div class="line ' + cls + '">' + escapeHtml(data.text) + '</div>';
+                    outputDiv.scrollTop = outputDiv.scrollHeight;
+                } else if (data.type === 'end') {
+                    outputDiv.innerHTML += '<div class="line ' + (data.success ? 'success' : 'error') + '">' + (data.success ? '=== 部署完成 ===' : '=== 部署失败 ===') + '</div>';
+                    eventSource.close();
+                }
+            };
+            eventSource.onerror = function() {
+                outputDiv.innerHTML += '<div class="line error">连接断开</div>';
+                eventSource.close();
+            };
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
         // 初始化
         loadRobots();
         loadUsers();
@@ -410,12 +480,104 @@ INDEX_HTML = '''
 </html>
 '''
 
+# ============== 页面渲染函数 ==============
+
+def render_robot_card(r):
+    """渲染机器人卡片HTML"""
+    status_class = 'status-online' if r['status'] == 'online' else 'status-offline'
+    return f'''
+    <div class="robot-card">
+        <h3>{r.get('hostname') or r['ip']}</h3>
+        <div class="robot-info">
+            <p>IP: {r['ip']}</p>
+            <p>SSH: {r['ssh_user']}@{r['ip']}</p>
+            <p>状态: <span class="status {status_class}">{r['status']}</span></p>
+            <p>最后在线: {r.get('last_online') or '-'}</p>
+        </div>
+        <div class="robot-actions">
+            <form method="post" action="/deploy/{r['id']}" style="display:inline;">
+                <button type="submit" class="btn btn-sm btn-success">部署</button>
+            </form>
+            <form method="post" action="/wechat_qr/{r['id']}" style="display:inline;">
+                <button type="submit" class="btn btn-sm">微信二维码</button>
+            </form>
+            <form method="post" action="/delete_robot/{r['id']}" style="display:inline;" onsubmit="return confirm('确认删除?')">
+                <button type="submit" class="btn btn-sm btn-danger">删除</button>
+            </form>
+        </div>
+    </div>
+    '''
+
+def render_user_row(u):
+    """渲染用户行HTML"""
+    return f'''
+    <tr>
+        <td>{u['id']}</td>
+        <td>{u['username']}</td>
+        <td>{u.get('nickname') or '-'}</td>
+        <td>{u.get('wechat_nickname') or '-'}</td>
+        <td>{u['role']}</td>
+        <td>{u['status']}</td>
+    </tr>
+    '''
+
+def render_log_row(l):
+    """渲染日志行HTML"""
+    return f'''
+    <tr>
+        <td>{l['created_at']}</td>
+        <td>{l['action']}</td>
+        <td>{l.get('detail') or '-'}</td>
+        <td>{l['result']}</td>
+    </tr>
+    '''
+
 # ============== API路由 ==============
 
 @app.route('/')
 def index():
-    """主页"""
-    return render_template_string(INDEX_HTML)
+    """主页 - 服务端渲染"""
+    robots = RobotDB.get_all_robots()
+    users = UserDB.get_all_users()
+    logs = LogDB.get_logs(limit=50)
+    
+    # 渲染机器人列表
+    if robots:
+        robot_html = ''.join(render_robot_card(r) for r in robots)
+    else:
+        robot_html = '<p>暂无机器人，请添加</p>'
+    
+    # 渲染用户列表
+    if users:
+        user_html = ''.join(render_user_row(u) for u in users)
+    else:
+        user_html = '<p>暂无用户</p>'
+    
+    # 渲染日志列表
+    if logs:
+        log_html = ''.join(render_log_row(l) for l in logs)
+    else:
+        log_html = '<p>暂无日志</p>'
+    
+    # 获取当前激活的tab
+    active_tab = request.args.get('tab', 'robots')
+    
+    # 生成页面
+    html = INDEX_HTML
+    
+    # 替换机器人列表内容
+    html = html.replace('id="robotList"', f'id="robotList" style="display:{"none" if active_tab != "robots" else "block"}"')
+    html = html.replace('<p>暂无机器人，请添加</p>', robot_html)
+    
+    # 替换用户列表内容  
+    html = html.replace('id="userList"', f'id="userList" style="display:{"none" if active_tab != "users" else "block"}"')
+    html = html.replace('<p>暂无用户</p>', user_html)
+    
+    # 替换日志列表内容
+    html = html.replace('id="logList"', f'id="logList" style="display:{"none" if active_tab != "logs" else "block"}"')
+    html = html.replace('<p>暂无日志</p>', log_html)
+    
+    return html
 
 @app.route('/api/robots', methods=['GET', 'POST'])
 def robots():
@@ -446,6 +608,182 @@ def robots():
         return jsonify({'success': True, 'message': '机器人添加成功', 'robot_id': robot_id})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
+
+# 表单提交路由（不依赖JavaScript）
+@app.route('/add_robot', methods=['POST'])
+def add_robot_form():
+    """添加机器人并自动部署"""
+    try:
+        ip = request.form.get('ip')
+        hostname = request.form.get('hostname')
+        ssh_user = request.form.get('ssh_user')
+        ssh_password = request.form.get('ssh_password')
+        
+        # 1. 添加机器人到数据库
+        robot_id = RobotDB.add_robot(
+            ip=ip,
+            hostname=hostname,
+            ssh_user=ssh_user,
+            ssh_password=ssh_password
+        )
+        LogDB.add_log(robot_id=robot_id, user_id=None, action='add_robot', detail=f"添加机器人: {ip}")
+        
+        # 2. 自动部署
+        robot = RobotDB.get_robot(robot_id)
+        try:
+            deployer = create_deployer(
+                host=robot['ip'],
+                username=robot['ssh_user'],
+                password=robot['ssh_password'],
+                key_filename=robot['ssh_key_path']
+            )
+            
+            output_lines = []
+            output_lines.append(f"开始部署到 {robot['ip']}...")
+            
+            with deployer.ssh as ssh:
+                output_lines.append("SSH连接成功")
+                result = deployer.full_deploy(smart_check=True)
+            
+            status = result.get('status', {})
+            for svc, st in status.items():
+                output_lines.append(f"  {svc}: {st}")
+            
+            output_lines.append("部署完成!")
+            
+            RobotDB.update_robot_status(robot_id, 'online', last_online=datetime.now().isoformat())
+            LogDB.add_log(robot_id=robot_id, user_id=None, action='deploy', detail=f"部署完成", result='success')
+            
+            msg = "\\n".join(output_lines)
+            return f"<script>alert('添加成功\\n\\n{msg}'); window.location.href='/?tab=robots';</script>"
+            
+        except Exception as deploy_err:
+            LogDB.add_log(robot_id=robot_id, user_id=None, action='deploy', detail=f"部署失败: {str(deploy_err)}", result='failed')
+            return f"<script>alert('添加成功，但部署失败: {str(deploy_err)}'); window.location.href='/?tab=robots';</script>"
+        
+    except Exception as e:
+        return f"<script>alert('错误: {str(e)}'); window.location.href='/?tab=robots';</script>"
+
+@app.route('/deploy/<int:robot_id>', methods=['POST'])
+def deploy_robot_form(robot_id):
+    """部署机器人表单提交"""
+    robot = RobotDB.get_robot(robot_id)
+    if not robot:
+        return "<script>alert('机器人不存在'); window.location.href='/';</script>"
+    
+    try:
+        deployer = create_deployer(
+            host=robot['ip'],
+            username=robot['ssh_user'],
+            password=robot['ssh_password'],
+            key_filename=robot['ssh_key_path']
+        )
+        
+        with deployer.ssh as ssh:
+            result = deployer.full_deploy(smart_check=True)
+        
+        status = result.get('status', {})
+        status_msgs = [f"{s}: {st}" for s, st in status.items()]
+        
+        RobotDB.update_robot_status(robot_id, 'online', last_online=datetime.now().isoformat())
+        LogDB.add_log(robot_id=robot_id, user_id=None, action='deploy', detail=f"部署完成 - {', '.join(status_msgs)}")
+        
+        return f"<script>alert('部署完成\\n{chr(10).join(status_msgs)}'); window.location.href='/?tab=robots';</script>"
+    except Exception as e:
+        LogDB.add_log(robot_id=robot_id, user_id=None, action='deploy', detail=f"部署失败: {str(e)}", result='failed')
+        return f"<script>alert('部署失败: {str(e)}'); window.location.href='/?tab=robots';</script>"
+
+@app.route('/delete_robot/<int:robot_id>', methods=['POST'])
+def delete_robot_form(robot_id):
+    """删除机器人表单提交"""
+    try:
+        RobotDB.delete_robot(robot_id)
+        LogDB.add_log(robot_id=robot_id, user_id=None, action='delete_robot', detail=f"删除机器人ID: {robot_id}")
+        return "<script>alert('删除成功'); window.location.href='/?tab=robots';</script>"
+    except Exception as e:
+        return f"<script>alert('删除失败: {str(e)}'); window.location.href='/?tab=robots';</script>"
+
+@app.route('/wechat_qr/<int:robot_id>', methods=['POST'])
+def wechat_qr_form(robot_id):
+    """获取微信二维码"""
+    robot = RobotDB.get_robot(robot_id)
+    if not robot:
+        return "<script>alert('机器人不存在'); window.location.href='/';</script>"
+    
+    try:
+        deployer = create_deployer(
+            host=robot['ip'],
+            username=robot['ssh_user'],
+            password=robot['ssh_password'],
+            key_filename=robot['ssh_key_path']
+        )
+        
+        with deployer.ssh as ssh:
+            result = ssh.execute(f"curl -s http://localhost:{robot.get('wechat_port', 8889)}/qrcode_base64")
+        
+        if result['success']:
+            import json
+            qr_data = json.loads(result['output'])
+            qr_code = qr_data.get('qr_code', '')
+            token = qr_data.get('token', '')
+            return f'''<script>
+                var win = window.open('', '_blank', 'width=400,height=500');
+                win.document.write(`
+                    <html><head><title>微信扫码授权</title></head>
+                    <body style="text-align:center;padding:50px;">
+                        <h2>请扫码授权</h2>
+                        <img src="{qr_code}" style="max-width:300px;">
+                        <p>Token: {token}</p>
+                        <p>有效期: 30分钟</p>
+                    </body></html>
+                `);
+                window.location.href='/?tab=robots';
+            </script>'''
+        else:
+            return "<script>alert('无法获取二维码'); window.location.href='/?tab=robots';</script>"
+    except Exception as e:
+        return f"<script>alert('获取失败: {str(e)}'); window.location.href='/?tab=robots';</script>"
+
+# 部署输出存储
+deploy_output_store = {}
+
+@app.route('/deploy/stream')
+def deploy_stream():
+    """部署实时输出SSE"""
+    import uuid
+    stream_id = str(uuid.uuid4())
+    
+    def generate():
+        import time
+        # 发送初始消息
+        yield f"data: {json.dumps({'type': 'line', 'text': '开始连接...'})}\n\n"
+        
+        # 这里需要部署完成后调用更新
+        # 暂时发送一个模拟消息
+        time.sleep(0.5)
+        yield f"data: {json.dumps({'type': 'line', 'text': '正在准备部署...'})}\n\n"
+        
+        # 保持连接一段时间
+        for i in range(30):
+            time.sleep(1)
+            if stream_id in deploy_output_store:
+                msg = deploy_output_store[stream_id]
+                yield f"data: {json.dumps(msg)}\n\n"
+                if msg.get('type') == 'end':
+                    break
+            else:
+                yield f"data: {json.dumps({'type': 'line', 'text': f'等待部署响应... ({i+1}s)'})}\n\n"
+    
+    from flask import Response
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/tab/<tab_name>')
+def switch_tab(tab_name):
+    """Tab切换"""
+    valid_tabs = ['robots', 'users', 'logs']
+    if tab_name not in valid_tabs:
+        tab_name = 'robots'
+    return redirect(f'/?tab={tab_name}')
 
 @app.route('/api/robots/<int:robot_id>', methods=['GET', 'DELETE'])
 def robot_detail(robot_id):
