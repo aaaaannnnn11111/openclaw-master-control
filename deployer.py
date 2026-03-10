@@ -108,7 +108,7 @@ class RobotDeployer:
     
     def __init__(self, ssh_client: SSHClient):
         self.ssh = ssh_client
-        self.install_path = '/opt/openclaw'
+        self.install_path = '~/openclaw'
     
     def check_connection(self):
         """检查连接和系统信息"""
@@ -175,22 +175,24 @@ class RobotDeployer:
         return True
     
     def start_services(self):
-        """启动所有服务"""
+        """启动所有服务（使用nohup，无需root权限）"""
         commands = [
-            'systemctl daemon-reload',
-            'systemctl enable openclaw-agent',
-            'systemctl enable rosclaw-agent',
-            'systemctl enable openclaw-wechat',
-            'systemctl restart openclaw-agent',
-            'systemctl restart rosclaw-agent',
-            'systemctl restart openclaw-wechat',
+            'pkill -f openclaw_agent.py 2>/dev/null || true',
+            'pkill -f rosclaw_agent.py 2>/dev/null || true',
+            'pkill -f wechat_qr_service.py 2>/dev/null || true',
+            'mkdir -p ~/openclaw/logs',
+            'cd ~/openclaw && nohup python3 openclaw_agent.py > ~/openclaw/logs/agent.log 2>&1 &',
+            'cd ~/openclaw && nohup python3 rosclaw_agent.py > ~/openclaw/logs/rosclaw.log 2>&1 &',
+            'cd ~/openclaw && nohup python3 wechat_qr_service.py > ~/openclaw/logs/wechat.log 2>&1 &',
+            'sleep 2',
+            'ps aux | grep -E "openclaw|wechat" | grep -v grep',
         ]
         
         for cmd in commands:
             print(f"执行: {cmd}")
-            result = self.ssh.execute(cmd, timeout=60)
-            if not result['success']:
-                print(f"警告: {result.get('error', '')}")
+            result = self.ssh.execute(cmd, timeout=30)
+            if result['output']:
+                print(result['output'][:200])
         
         return True
     
@@ -223,13 +225,20 @@ class RobotDeployer:
         return True
     
     def get_service_status(self):
-        """获取服务状态"""
-        services = ['openclaw-agent', 'rosclaw-agent', 'openclaw-wechat']
+        """获取服务状态（使用ps检查进程）"""
+        services = {
+            'openclaw-agent': 'openclaw_agent.py',
+            'rosclaw-agent': 'rosclaw_agent.py',
+            'openclaw-wechat': 'wechat_qr_service.py'
+        }
         status = {}
         
-        for svc in services:
-            result = self.ssh.execute(f'systemctl is-active {svc} 2>/dev/null || echo "unknown"')
-            status[svc] = result['output'].strip()
+        for svc, process_name in services.items():
+            result = self.ssh.execute(f'ps aux | grep "{process_name}" | grep -v grep')
+            if result['output'].strip():
+                status[svc] = 'running'
+            else:
+                status[svc] = 'stopped'
         
         return status
     
@@ -244,7 +253,7 @@ class RobotDeployer:
             'already_ok': []
         }
         
-        # 1. 检查OpenClaw是否已安装
+        # 1. 检查OpenClaw目录是否存在
         installed = self.check_openclaw()
         results['checked'].append(('openclaw_installed', installed))
         
@@ -255,59 +264,19 @@ class RobotDeployer:
             self.install_wechat_qr_service()
             results['fixed'].append('openclaw_installed')
         
-        # 2. 检查各服务状态
-        services = ['openclaw-agent', 'rosclaw-agent', 'openclaw-wechat']
+        # 2. 启动服务
+        self.start_services()
         
-        for svc in services:
-            result = self.ssh.execute(f'systemctl is-active {svc} 2>/dev/null || echo "unknown"')
-            status = result['output'].strip()
-            results['checked'].append((svc, status))
-            
-            if status == 'active':
+        # 3. 获取最终状态
+        final_status = self.get_service_status()
+        
+        for svc, status in final_status.items():
+            if status == 'running':
                 print(f"✅ {svc}: 运行中")
                 results['already_ok'].append(svc)
-            elif status == 'failed':
-                print(f"❌ {svc}: 启动失败，尝试修复...")
-                # 查看错误日志
-                log_result = self.ssh.execute(f'journalctl -u {svc} -n 10 --no-pager 2>/dev/null || echo "无法获取日志"')
-                print(f"   日志: {log_result['output'][:200]}...")
-                
-                # 尝试重启服务
-                restart_result = self.ssh.execute(f'systemctl restart {svc}', timeout=30)
-                if restart_result['success']:
-                    # 等待一下再检查
-                    self.ssh.execute('sleep 2')
-                    check = self.ssh.execute(f'systemctl is-active {svc}')
-                    if check['output'].strip() == 'active':
-                        print(f"✅ {svc}: 修复成功")
-                        results['fixed'].append(svc)
-                    else:
-                        print(f"❌ {svc}: 修复失败")
-                        results['failed'].append(svc)
-                else:
-                    print(f"❌ {svc}: 修复失败")
-                    results['failed'].append(svc)
             else:
-                # 服务未启动，尝试启动
-                print(f"⚠️ {svc}: 未运行，尝试启动...")
-                start_result = self.ssh.execute(f'systemctl start {svc}', timeout=30)
-                if start_result['success']:
-                    self.ssh.execute('sleep 2')
-                    check = self.ssh.execute(f'systemctl is-active {svc}')
-                    if check['output'].strip() == 'active':
-                        print(f"✅ {svc}: 启动成功")
-                        results['fixed'].append(svc)
-                    else:
-                        results['failed'].append(svc)
-                else:
-                    results['failed'].append(svc)
-        
-        # 3. 确保服务开机自启
-        for svc in services:
-            self.ssh.execute(f'systemctl enable {svc}', timeout=30)
-        
-        # 4. 获取最终状态
-        final_status = self.get_service_status()
+                print(f"❌ {svc}: 未运行")
+                results['failed'].append(svc)
         
         return {
             'success': len(results['failed']) == 0,
@@ -318,7 +287,7 @@ class RobotDeployer:
     def get_wechat_qr(self):
         """获取微信二维码"""
         # 从服务获取二维码
-        result = self.ssh.execute('cat /opt/openclaw/wechat_qr_code.png 2>/dev/null | base64 | head -1')
+        result = self.ssh.execute('cat ~/openclaw/wechat_qr_code.png 2>/dev/null | base64 | head -1')
         if result['success']:
             return result['output'].strip()
         return None
@@ -401,8 +370,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
 # 配置日志
-LOG_FILE = '/var/log/openclaw/agent.log'
-os.makedirs('/var/log/openclaw', exist_ok=True)
+LOG_FILE = os.path.expanduser('~/openclaw/logs/agent.log')
+os.makedirs(os.path.expanduser('~/openclaw/logs'), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -502,8 +471,8 @@ import time
 import logging
 from datetime import datetime
 
-LOG_FILE = '/var/log/openclaw/rosclaw.log'
-os.makedirs('/var/log/openclaw', exist_ok=True)
+LOG_FILE = os.path.expanduser('~/openclaw/logs/rosclaw.log')
+os.makedirs(os.path.expanduser('~/openclaw/logs'), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -577,9 +546,9 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qs
 
 # 配置日志
-LOG_FILE = '/var/log/openclaw/wechat.log'
-QR_FILE = '/opt/openclaw/wechat_qr_code.png'
-os.makedirs('/var/log/openclaw', exist_ok=True)
+LOG_FILE = os.path.expanduser('~/openclaw/logs/wechat.log')
+QR_FILE = os.path.expanduser('~/openclaw/wechat_qr_code.png')
+os.makedirs(os.path.expanduser('~/openclaw/logs'), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
