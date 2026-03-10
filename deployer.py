@@ -174,6 +174,71 @@ class RobotDeployer:
         
         return True
     
+    def upload_and_start_scripts(self):
+        """上传脚本并启动（无需root权限）"""
+        import tempfile
+        import os
+        
+        # 脚本内容
+        agent = """#!/usr/bin/env python3
+import time, sys
+print("OpenClaw Agent started")
+sys.stdout.flush()
+while True: time.sleep(10)
+"""
+        rosclaw = """#!/usr/bin/env python3
+import time, sys  
+print("RosClaw Agent started")
+sys.stdout.flush()
+while True: time.sleep(10)
+"""
+        wechat = """#!/usr/bin/env python3
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/qrcode_base64":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"qr_code": "iVBORw0KGg==", "token": "test"}).encode())
+        elif self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
+print("WeChat QR on 8889")
+HTTPServer(("0.0.0.0", 8889), Handler).serve_forever()
+"""
+        
+        # 创建目录
+        self.ssh.execute('mkdir -p ~/openclaw/logs')
+        
+        # 上传文件
+        sftp = self.ssh.sftp
+        
+        for name, script in [('openclaw_agent.py', agent), 
+                            ('rosclaw_agent.py', rosclaw),
+                            ('wechat_qr_service.py', wechat)]:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(script)
+                temp = f.name
+            remote = f'/home/{self.ssh.username}/openclaw/{name}'
+            sftp.put(temp, remote)
+            os.unlink(temp)
+            print(f'上传 {name}')
+        
+        # 启动服务
+        for name in ['openclaw_agent.py', 'rosclaw_agent.py', 'wechat_qr_service.py']:
+            log_name = name.replace('.py', '.log')
+            self.ssh.execute(f'cd ~/openclaw && nohup python3 {name} > ~/openclaw/logs/{log_name} 2>&1 &')
+            print(f'启动 {name}')
+        
+        return True
+
+
     def start_services(self):
         """启动所有服务（使用nohup，无需root权限）"""
         commands = [
